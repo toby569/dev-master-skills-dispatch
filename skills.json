@@ -6,8 +6,6 @@
   "sources": [
     {
       "path": "upstreams/mattpocock-skills",
-      "manifest": ".claude-plugin/plugin.json",
-      "sharedPaths": [],
       "aliases": {
         "claude": { "code-review": "mattpocock-code-review" }
       }

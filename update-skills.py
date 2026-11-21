@@ -46,20 +46,97 @@ def update_lock(repo):
         yield  # Closing the handle releases the lock, including after an exception.
 
 
-def read_skills(repo, ref, manifest):
-    entries = json.loads(git(repo, "show", f"{ref}:{manifest}"))["skills"]
-    if not isinstance(entries, list):
-        raise ValueError(f"{manifest} 缺少 skills 列表")
+def configured_sources(repo, overrides):
+    """Use Git's own parser, including custom subsection names and paths with spaces."""
+    options = {item["path"]: item for item in overrides}
+    if not (repo / ".gitmodules").is_file():
+        return []
+    records = git(repo, "config", "--null", "--file", ".gitmodules", "--get-regexp",
+                  r"^submodule\..*\.path$", missing_ok=True)
+    paths = [record.split("\n", 1)[1] for record in records.split("\0") if record]
+    for stale in sorted(options.keys() - set(paths)):
+        print(f"忽略未登记的子模块配置: {stale}", file=sys.stderr)
+    return [options.get(path, {"path": path}) for path in paths]
+
+
+def relative_dir(entry):
+    if not isinstance(entry, str):
+        raise ValueError(f"Skill 目录必须是相对路径: {entry!r}")
+    path = entry.removeprefix("./").rstrip("/")
+    if entry in (".", "./"):
+        return "."
+    if (not path or "\\" in path or ":" in path
+            or any(part in ("", ".", "..") for part in path.split("/"))):
+        raise ValueError(f"无效的 Skill 路径: {entry!r}")
+    return path
+
+
+def read_skills(repo, ref, source):
+    # Resolve the catalog at the requested commit, including removed or moved skills.
+    tree = git(repo, "ls-tree", "-r", "-z", "--full-tree", ref)
+    files = {record.split("\t", 1)[1] for record in tree.split("\0") if record.startswith("100")}
+    skill_files = {p for p in files if p == "SKILL.md" or p.endswith("/SKILL.md")}
+    if "skillRoots" in source and "manifest" in source:
+        raise ValueError("每个来源只能指定 manifest 或 skillRoots 中的一项")
+    roots = source.get("skillRoots")
+    explicit_manifest = source.get("manifest")
+    if roots is None:
+        candidates = [explicit_manifest] if explicit_manifest else [
+            ".claude-plugin/plugin.json", ".codex-plugin/plugin.json",
+        ]
+        for manifest in candidates:
+            if manifest not in files and not explicit_manifest:
+                continue
+            data = json.loads(git(repo, "show", f"{ref}:{manifest}"))
+            if not isinstance(data, dict):
+                raise ValueError(f"{manifest} 必须是 JSON 对象")
+            if "skills" not in data and not explicit_manifest:
+                continue
+            roots = data["skills"]
+            if isinstance(roots, str):
+                roots = [roots]
+            if not isinstance(roots, list):
+                raise ValueError(f"{manifest} 的 skills 必须是目录或目录列表")
+            for entry in roots:
+                directory = relative_dir(entry)
+                if directory != "." and not any(p.startswith(directory + "/") for p in files):
+                    raise ValueError(f"{manifest} 指向不存在的目录: {entry}")
+            break
+    if roots is None:
+        roots = ["."] if "SKILL.md" in files else ["skills"]
+    if not isinstance(roots, list):
+        raise ValueError("skillRoots 必须是相对目录列表")
+
+    selected = set()
+    for entry in roots:
+        directory = relative_dir(entry)
+        prefix = "" if directory == "." else directory + "/"
+        for p in skill_files:
+            if not p.startswith(prefix):
+                continue
+            parts = p[len(prefix):].split("/")
+            # A skill owns its resources. Do not publish nested examples as separate entries.
+            if (any(part.startswith(".") for part in parts[:-1])
+                    or any(prefix + "/".join(parts[:i] + ["SKILL.md"]) in skill_files
+                           for i in range(len(parts) - 1))):
+                continue
+            selected.add(p)
+
     result = {}
-    for entry in entries:
-        path = entry.removeprefix("./")
-        if (not re.fullmatch(r"[\w-]+(?:/[\w.-]+)*", path, re.ASCII)
-                or any(part in (".", "..") for part in path.split("/"))):
-            raise ValueError(f"无效的 Skill 路径: {entry}")
-        name = path.rsplit("/", 1)[-1]
+    for p in sorted(selected):
+        directory, _, _ = p.rpartition("/")
+        if directory:
+            name = directory.rsplit("/", 1)[-1]
+        else:
+            text = git(repo, "show", f"{ref}:SKILL.md").lstrip("\ufeff")
+            header = re.match(r"\A---\n(.*?)\n---(?:\n|\Z)", text, re.DOTALL)
+            match = header and re.search(r"""(?m)^name:[ \t]*(['"]?)([A-Za-z0-9_-]+)\1[ \t]*(?:#[^\n]*)?$""", header[1])
+            if not match:
+                raise ValueError("根目录 SKILL.md 缺少有效的 name 字段")
+            name = match[2]
         if name in result:
-            raise ValueError(f"发布清单包含重名 Skill: {name}")
-        result[name] = path
+            raise ValueError(f"同一来源的两个 Skill 重名: {name} ({result[name]}, {directory})")
+        result[name] = directory or "."
     return result
 
 
@@ -199,7 +276,7 @@ def report_changes(repo, source, old, new, before, after, no_ai):
     for name in sorted(before.keys() | after.keys()):
         paths = set(source.get("sharedPaths", []))
         paths.update(p for p in (before.get(name), after.get(name)) if p)
-        matched = [f for f in changed if any(f == p or f.startswith(p + "/") for p in paths)]
+        matched = [f for f in changed if f and any(p == "." or f == p or f.startswith(p + "/") for p in paths)]
         if name not in before:
             kind = "新增"
         elif name not in after:
@@ -238,22 +315,23 @@ def report_changes(repo, source, old, new, before, after, no_ai):
 
 
 def update_source(root, source, agents, args):
-    path, manifest = source["path"], source["manifest"]
+    path = source["path"]
+    print(f"\n[{path}]", flush=True)
     repo = root / path
     if not (repo / ".git").exists():
         git(root, "submodule", "update", "--init", "--checkout", "--", path)
     old = git(repo, "rev-parse", "HEAD")
-    before = read_skills(repo, old, manifest)
+    before = read_skills(repo, old, source)
     if not args.links_only:
         if git(repo, "status", "--porcelain"):
             raise ValueError("子模块有本地改动，本次跳过更新。")
         git(root, "submodule", "update", "--init", "--remote", "--checkout", "--", path)
     new = git(repo, "rev-parse", "HEAD")
-    after = read_skills(repo, new, manifest) if old != new else before
+    after = read_skills(repo, new, source) if old != new else before
     if not args.links_only:
         report_changes(repo, source, old, new, before, after, args.no_ai)
     linked = git(repo, "rev-parse", "--verify", "--quiet", LINKED_REF, missing_ok=True)
-    previous = read_skills(repo, linked, manifest) if linked and linked != old else before
+    previous = read_skills(repo, linked, source) if linked and linked != old else before
     sync_agents(repo, source, previous, after, agents, args.agent_home)
     git(repo, "update-ref", LINKED_REF, new)
 
@@ -269,7 +347,7 @@ def main():
     try:
         config = json.loads((ROOT / "skills.json").read_text(encoding="utf-8-sig"))
         with update_lock(ROOT):
-            for source in config["sources"]:
+            for source in configured_sources(ROOT, config.get("sources", [])):
                 try:
                     update_source(ROOT, source, config["agents"], args)
                 except (OSError, ValueError, KeyError, RuntimeError) as exc:

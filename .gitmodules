@@ -1,3 +1,6 @@
 [submodule "upstreams/mattpocock-skills"]
 	path = upstreams/mattpocock-skills
 	url = https://github.com/mattpocock/skills.git
+[submodule "upstreams/vercel-labs-skills"]
+	path = upstreams/vercel-labs-skills
+	url = https://github.com/vercel-labs/skills.git

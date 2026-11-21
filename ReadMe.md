@@ -36,12 +36,13 @@ python update-skills.py
 
 ### 添加 Skill 来源
 
-来源列表直接读取本仓库的 `.gitmodules`。在管理仓库根目录添加子模块后，运行同一个更新命令：
+运行独立的添加脚本：
 
 ```sh
-git submodule add <仓库地址> upstreams/<本地目录名>
-python update-skills.py
+python add-skill-repo.py
 ```
+
+粘贴 Git 仓库的 HTTPS 或 SSH 克隆地址，也可以输入 GitHub 的 `owner/repo`。脚本会建议本地目录名，回车即可接受，也可以输入其他名称。添加成功后会显示发现的 Skill，并同步到配置的个人 Agent。已登记的地址会复用原有目录。输入 `q` 可以取消。
 
 默认按各子模块的提交内容发现 Skill：
 
@@ -52,5 +53,18 @@ python update-skills.py
 [skills.json](skills.json) 的 `agents` 定义个人入口位置，`sources` 只需填写有例外配置的子模块。例如，使用非标准目录时可添加 `{"path":"upstreams/example","skillRoots":["packages/public-skills"]}`。也可以通过 `manifest` 指定其他发布清单。每个来源可以设置 `aliases` 解决同名冲突，用 `sharedPaths` 将共享文件纳入变更摘要。
 
 当前 Matt Pocock 来源按其插件发布清单分发，Vercel 来源从 `skills/find-skills` 分发 `find-skills`。
+
+### 移除 Skill 来源
+
+```sh
+python remove-skill-repo.py
+```
+
+脚本列出已登记的子模块。输入编号，选择是否同步清理个人 Agent 入口，再确认移除。回车或输入 `q` 可以在选择阶段退出。
+
+- **清理入口**会移除所选子模块的工作目录和指向它的受管入口。同名的其他来源和手工安装的目录会保留。子模块内有本地修改或未提交的文件时，脚本会提示先保存。
+- **保留入口**会取消 Git 子模块登记，保留已有入口、本地源码和该来源的别名等配置。源码目录此时是未跟踪目录，再次添加同一仓库可重新登记它。提交移除操作时，只提交计划中的文件，避免把保留的目录重新加入索引。
+
+来源登记的改动保存在本地 Git 仓库中。完成后用 `git status` 查看改动，再按需提交和推送。两个脚本共用 `skill_dispatch.py`，均支持 `--agent-home <目录>`。日常更新仍使用 `python update-skills.py`。
 
 Windows 版 Codex 的个人目录使用可发现的 `SKILL.md` 入口，保留上游描述与 `agents` 元数据，正文指向子模块原件。每个入口的 `.source` 目录联接可直接访问原始脚本和模板。Claude Code 使用目录联接，重名的 Skill 使用独立命名的入口。Claude Code 的 Matt 版代码审查使用 `/mattpocock-code-review`。

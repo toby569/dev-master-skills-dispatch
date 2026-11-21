@@ -2,8 +2,8 @@
 import argparse
 import json
 
-from skill_dispatch import (
-    ROOT, agent_home_argument, ask, git, link_target, read_config, registered_submodules,
+from internal.skill_dispatch import (
+    CONFIG_PATH, ROOT, agent_home_argument, ask, git, link_target, read_config, registered_submodules,
     run_cli, sync_entry, update_lock, wrapper_text, write_text_if_changed,
 )
 
@@ -103,11 +103,11 @@ def remove_source(path, module, cleanup, home, config):
     overrides = config.get("sources", [])
     remaining = [item for item in overrides if item["path"] != path]
     if not keep_checkout and len(remaining) != len(overrides):
-        stage = not git(ROOT, "diff", "--name-only", "--", "skills.json")
+        stage = not git(ROOT, "diff", "--name-only", "--", CONFIG_PATH)
         config["sources"] = remaining
-        write_text_if_changed(ROOT / "skills.json", json.dumps(config, ensure_ascii=False, indent=2) + "\n")
+        write_text_if_changed(ROOT / CONFIG_PATH, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
         if stage:
-            git(ROOT, "add", "--", "skills.json")
+            git(ROOT, "add", "--", CONFIG_PATH)
     print(f"已从管理仓库移除 {path}。")
     if keep_checkout:
         print(f"已保留 {len(entries)} 个入口和本地源码 {repo}；该目录现为未跟踪目录，入口仍可使用。")

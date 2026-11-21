@@ -26,9 +26,11 @@ class InteractiveTests(unittest.TestCase):
         for directory in (self.hub, self.remote):
             directory.mkdir()
             self.git(directory, "init", "-q")
-        for name in ("skill_dispatch.py", "add-skill-repo.py", "remove-skill-repo.py", "update-skills.py"):
-            shutil.copyfile(ROOT / name, self.hub / name)
-        (self.hub / "skills.json").write_text(json.dumps({"agents": {"codex": ".agents/skills", "claude": ".claude/skills"}}))
+        shutil.copytree(ROOT / "scripts", self.hub / "scripts",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        (self.hub / "config").mkdir()
+        self.config_file = self.hub / "config" / "skills.json"
+        self.config_file.write_text(json.dumps({"agents": {"codex": ".agents/skills", "claude": ".claude/skills"}}))
         (self.remote / "SKILL.md").write_text("---\nname: test-skill\ndescription: Example\n---\nDo the work.\n")
         for directory in (self.hub, self.remote):
             self.git(directory, "add", ".")
@@ -41,7 +43,7 @@ class InteractiveTests(unittest.TestCase):
         return subprocess.check_output(["git", "-C", str(repo), *args], env=self.env, text=True).strip()
 
     def cli(self, script, answer="", status=0):
-        result = subprocess.run([sys.executable, "-B", str(self.hub / script), "--agent-home", str(self.home)],
+        result = subprocess.run([sys.executable, "-B", str(self.hub / "scripts" / script), "--agent-home", str(self.home)],
                                 input=answer, text=True, capture_output=True, encoding="utf-8", env=self.env)
         self.assertEqual(result.returncode, status, result.stdout + result.stderr)
         return result.stdout + result.stderr
@@ -55,26 +57,56 @@ class InteractiveTests(unittest.TestCase):
         self.assertTrue((self.claude / "SKILL.md").is_file())
         self.assertIn("已登记", self.cli("add-skill-repo.py", "git@github.com:example/demo.git\n"))
         self.assertIn("已取消", self.cli("remove-skill-repo.py", "9\n1\ny\nn\n"))
-        config_file = self.hub / "skills.json"
-        config = json.loads(config_file.read_text())
+        config = json.loads(self.config_file.read_text())
         config["sources"] = [{"path": "upstreams/example-demo", "sharedPaths": ["shared.md"]}]
-        config_file.write_text(json.dumps(config))
-        self.git(self.hub, "add", "skills.json")
+        self.config_file.write_text(json.dumps(config))
+        self.git(self.hub, "add", "config/skills.json")
         self.git(self.hub, "commit", "-qm", "register")
         self.assertIn("已保留", self.cli("remove-skill-repo.py", "1\nn\ny\n"))
         self.assertTrue((self.claude / "SKILL.md").is_file())
-        self.assertEqual(json.loads(config_file.read_text()), config)
+        self.assertEqual(json.loads(self.config_file.read_text()), config)
         self.assertNotIn("160000", self.git(self.hub, "ls-files", "-s", "--", "upstreams"))
         self.assertIn("重新登记", self.cli("add-skill-repo.py", URL + "\n\n"))
         unmanaged = self.home / ".agents/skills/another"
         unmanaged.mkdir()
         self.assertIn("已清理 2", self.cli("remove-skill-repo.py", "1\ny\ny\n"))
+        self.assertEqual(json.loads(self.config_file.read_text())["sources"], [])
+        self.assertIn("config/skills.json", self.git(self.hub, "diff", "--cached", "--name-only").splitlines())
         self.assertFalse(os.path.lexists(self.claude))
         self.assertFalse(self.entry.exists())
         self.assertFalse(self.source.exists())
         self.assertTrue(unmanaged.exists())
         self.assertIn("test-skill", self.cli("add-skill-repo.py", URL + "\n\n"))
         self.assertIn("入口 0", self.cli("update-skills.py"))
+
+    def test_sync_installs_current_skills_for_a_new_agent_offline(self):
+        self.cli("add-skill-repo.py", URL + "\n\n")
+        config = json.loads(self.config_file.read_text())
+        config["agents"]["example"] = ".example/skills"
+        self.config_file.write_text(json.dumps(config))
+        self.env["GIT_ALLOW_PROTOCOL"] = "none"
+        revision = self.git(self.source, "rev-parse", "HEAD")
+
+        self.assertIn("调整入口 1 个", self.cli("sync-skills.py"))
+        entry = self.home / ".example/skills/test-skill"
+        self.assertEqual(entry.resolve(), self.source.resolve())
+        self.assertTrue((entry / "SKILL.md").is_file())
+        self.assertEqual(self.git(self.source, "rev-parse", "HEAD"), revision)
+        self.assertIn("调整入口 0 个", self.cli("sync-skills.py"))
+
+    def test_sync_reports_a_missing_checkout_and_processes_other_sources(self):
+        self.cli("add-skill-repo.py", URL + "\n\n")
+        modules = self.hub / ".gitmodules"
+        modules.write_text('[submodule "missing"]\n\tpath = upstreams/missing\n\turl = ' + URL + '\n'
+                           + modules.read_text())
+        config = json.loads(self.config_file.read_text())
+        config["agents"]["example"] = ".example/skills"
+        self.config_file.write_text(json.dumps(config))
+
+        output = self.cli("sync-skills.py", status=1)
+        self.assertIn("upstreams/missing — 子模块尚未检出", output)
+        self.assertFalse((self.hub / "upstreams/missing").exists())
+        self.assertTrue((self.home / ".example/skills/test-skill/SKILL.md").is_file())
 
     def test_dirty_checkout_and_foreign_entries_are_preserved(self):
         self.cli("add-skill-repo.py", URL + "\ncustom-folder\n")
@@ -98,14 +130,14 @@ class InteractiveTests(unittest.TestCase):
         self.claude.mkdir()
         foreign = self.claude / "SKILL.md"
         foreign.write_text("team workflow")
-        (self.hub / "skills.json").write_text(json.dumps({
+        self.config_file.write_text(json.dumps({
             "agents": {"codex": ".agents/skills", "claude": ".claude/skills"},
             "sources": [{"path": "upstreams/custom-folder", "skillRoots": ["."]}, {"path": "other"}]
         }))
         self.assertIn("已清理 1", self.cli("remove-skill-repo.py", "1\ny\ny\n"))
         self.assertEqual(foreign.read_text(), "team workflow")
-        self.assertEqual(json.loads((self.hub / "skills.json").read_text())["sources"], [{"path": "other"}])
-        self.assertTrue(self.git(self.hub, "diff", "--name-only", "--", "skills.json"))
+        self.assertEqual(json.loads(self.config_file.read_text())["sources"], [{"path": "other"}])
+        self.assertTrue(self.git(self.hub, "diff", "--name-only", "--", "config/skills.json"))
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-spec = importlib.util.spec_from_file_location("dispatcher", Path(__file__).resolve().parents[1] / "skill_dispatch.py")
+module_path = Path(__file__).resolve().parents[1] / "scripts" / "internal" / "skill_dispatch.py"
+spec = importlib.util.spec_from_file_location("dispatcher", module_path)
 dispatcher = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dispatcher)
 

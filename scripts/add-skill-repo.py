@@ -5,8 +5,8 @@ from pathlib import Path, PureWindowsPath
 import re
 from urllib.parse import urlsplit
 
-from skill_dispatch import (
-    ROOT, agent_home_argument, ask, configured_sources, git, read_config,
+from internal.skill_dispatch import (
+    CONFIG_PATH, ROOT, agent_home_argument, ask, configured_sources, git, read_config,
     registered_submodules, run_cli, update_lock, update_source,
 )
 
@@ -111,7 +111,7 @@ def main():
         if skills:
             print("可用 Skill：" + "、".join(sorted(skills)))
         else:
-            print("已登记来源。该版本未发现标准布局的 Skill，可在 skills.json 中指定 skillRoots。")
+            print(f"已登记来源。该版本未发现标准布局的 Skill，可在 {CONFIG_PATH} 中指定 skillRoots。")
     return 0
 
 

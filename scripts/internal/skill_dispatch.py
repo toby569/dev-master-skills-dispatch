@@ -13,7 +13,8 @@ import tempfile
 from contextlib import contextmanager
 from typing import NamedTuple
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
+CONFIG_PATH = "config/skills.json"
 LINKED_REF = "refs/skills-dispatch/linked"
 
 
@@ -334,11 +335,13 @@ def report_changes(repo, source, old, new, before, after, no_ai):
         print(f"- {entry}")
 
 
-def update_source(root, source, agents, home, *, links_only=False, no_ai=False):
+def update_source(root, source, agents, home, *, links_only=False, no_ai=False, init_missing=True):
     path = source["path"]
     print(f"\n[{path}]", flush=True)
     repo = root / path
     if not (repo / ".git").exists():
+        if not init_missing:
+            raise ValueError("子模块尚未检出。可运行 git submodule update --init 后重新同步。")
         git(root, "submodule", "update", "--init", "--checkout", "--", path)
     old = git(repo, "rev-parse", "HEAD")
     before = read_skills(repo, old, source)
@@ -357,9 +360,22 @@ def update_source(root, source, agents, home, *, links_only=False, no_ai=False):
     return after
 
 
+def update_sources(home, **options):
+    """Apply the requested operation to each registered source under the shared lock."""
+    failed = False
+    with update_lock(ROOT):
+        config = read_config(ROOT)
+        for source in configured_sources(ROOT, config.get("sources", [])):
+            try:
+                update_source(ROOT, source, config["agents"], home, **options)
+            except (OSError, ValueError, KeyError, RuntimeError) as exc:
+                print(f"{source['path']} — {exc}", file=sys.stderr)
+                failed = True
+    return int(failed)
+
 
 def read_config(root):
-    return json.loads((root / "skills.json").read_text(encoding="utf-8-sig"))
+    return json.loads((root / CONFIG_PATH).read_text(encoding="utf-8-sig"))
 
 
 def agent_home_argument(parser):

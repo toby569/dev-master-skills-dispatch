@@ -4,3 +4,6 @@
 [submodule "upstreams/vercel-labs-skills"]
 	path = upstreams/vercel-labs-skills
 	url = https://github.com/vercel-labs/skills.git
+[submodule "upstreams/bmad-code-org-BMAD-METHOD"]
+	path = upstreams/bmad-code-org-BMAD-METHOD
+	url = https://github.com/bmad-code-org/BMAD-METHOD.git

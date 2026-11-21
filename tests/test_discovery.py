@@ -1,16 +1,14 @@
 """Regression tests for discovering skills from Git history and submodule registrations."""
 from contextlib import redirect_stdout
-import importlib.util
 import io
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
-module_path = Path(__file__).resolve().parents[1] / "scripts" / "internal" / "skill_dispatch.py"
-spec = importlib.util.spec_from_file_location("dispatcher", module_path)
-dispatcher = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(dispatcher)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from internal import skill_dispatch as dispatcher
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -72,8 +70,11 @@ class DiscoveryTests(unittest.TestCase):
         self.write("scripts/run.py", "# Changed relative to the root skill")
         output = io.StringIO()
         with redirect_stdout(output):
-            dispatcher.report_changes(self.repo, {"path": "source"}, before, self.snapshot(), skills, skills, True)
+            after = self.snapshot()
+            report = dispatcher.UpdateReport(self.repo)
+            dispatcher.report_changes(self.repo, {"path": "source"}, before, after, skills, skills, report)
         self.assertIn("root-skill (修改) scripts/run.py", output.getvalue())
+        self.assertIn("+# Changed relative to the root skill", report.path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

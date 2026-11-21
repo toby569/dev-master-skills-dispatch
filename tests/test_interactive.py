@@ -42,8 +42,8 @@ class InteractiveTests(unittest.TestCase):
     def git(self, repo, *args):
         return subprocess.check_output(["git", "-C", str(repo), *args], env=self.env, text=True).strip()
 
-    def cli(self, script, answer="", status=0):
-        result = subprocess.run([sys.executable, "-B", str(self.hub / "scripts" / script), "--agent-home", str(self.home)],
+    def cli(self, script, answer="", status=0, *, args=()):
+        result = subprocess.run([sys.executable, "-B", str(self.hub / "scripts" / script), "--agent-home", str(self.home), *args],
                                 input=answer, text=True, capture_output=True, encoding="utf-8", env=self.env)
         self.assertEqual(result.returncode, status, result.stdout + result.stderr)
         return result.stdout + result.stderr
@@ -93,6 +93,36 @@ class InteractiveTests(unittest.TestCase):
         self.assertTrue((entry / "SKILL.md").is_file())
         self.assertEqual(self.git(self.source, "rev-parse", "HEAD"), revision)
         self.assertIn("调整入口 0 个", self.cli("sync-skills.py"))
+        self.assertFalse((self.hub / "reports").exists())
+
+    def test_update_writes_a_report_and_syncs_without_ai(self):
+        self.cli("add-skill-repo.py", URL + "\n\n")
+        old = self.git(self.source, "rev-parse", "HEAD")
+        (self.remote / "guide.txt").write_text("Updated instructions\n")
+        self.git(self.remote, "add", "guide.txt")
+        self.git(self.remote, "commit", "-qm", "Update instructions")
+        new = self.git(self.remote, "rev-parse", "HEAD")
+
+        output = self.cli("update-skills.py", args=("--no-ai",))
+        report, = (self.hub / "reports").glob("skill-updates-*.txt")
+        self.assertIn(str(report), output)
+        details = report.read_text(encoding="utf-8")
+        for value in ("upstreams/example-demo", old, new, "test-skill (修改) guide.txt", "+Updated instructions"):
+            self.assertIn(value, details)
+        self.assertEqual((self.claude / "guide.txt").read_text(), "Updated instructions\n")
+        self.cli("update-skills.py", args=("--no-ai",))
+        other, = set(report.parent.glob("*.txt")) - {report}
+        self.assertIn("上游无更新", other.read_text(encoding="utf-8"))
+        self.assertEqual(report.read_text(encoding="utf-8"), details)
+
+        (self.remote / "guide.txt").write_text("Another update\n")
+        self.git(self.remote, "commit", "-qam", "Revise instructions")
+        # A local stdin/stdout command exercises the AI interface without using an account.
+        summarize = "import sys; assert '+Another update' in sys.stdin.buffer.read().decode('utf-8'); print('Summary OK')"
+        output = self.cli("update-skills.py", args=("--ai-command", sys.executable, "-c", summarize))
+        latest, = set(report.parent.glob("*.txt")) - {report, other}
+        self.assertIn("Summary OK", output)
+        self.assertIn("Summary OK", latest.read_text(encoding="utf-8"))
 
     def test_sync_reports_a_missing_checkout_and_processes_other_sources(self):
         self.cli("add-skill-repo.py", URL + "\n\n")

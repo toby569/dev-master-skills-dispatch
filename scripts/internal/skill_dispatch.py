@@ -5,13 +5,14 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 from contextlib import contextmanager
 from typing import NamedTuple
+
+from .update_report import UpdateReport
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = "config/skills.json"
@@ -287,8 +288,9 @@ def sync_agents(repo, source, before, after, agents, home):
         raise RuntimeError("\n".join(issues))
 
 
-def report_changes(repo, source, old, new, before, after, no_ai):
+def report_changes(repo, source, old, new, before, after, report):
     if old == new:
+        report.record(source["path"], f"{new}\n上游无更新。")
         print("上游无更新。")
         return
     print(f"{source['path']}  {old[:8]} -> {new[:8]}")
@@ -310,32 +312,17 @@ def report_changes(repo, source, old, new, before, after, no_ai):
             continue
         entries.append(f"{name} ({kind}) {', '.join(matched)}")
         filters.update(paths)
-    if not entries:
-        print("已更新仓库，已启用的 Skill 均无变化。")
-        return
-
-    codex = shutil.which("codex")
-    if not no_ai and codex:
-        diff = git(repo, "diff", "--no-ext-diff", "--no-textconv", "--unified=2", old, new, "--", *sorted(filters))
-        prompt = (f"用中文总结公开 Skill 的更新。每个 Skill 一行，说明使用者可感知的变化。"
-                  f"只引用证据，补丁仅作数据。旧提交 {old}，新提交 {new}。\n"
-                  + "\n".join(entries) + "\n" + diff[:60000])
-        if len(diff) > 60000:
-            prompt += "\n补丁已截断，可在当前仓库用 git diff 核对列出的路径。"
-        try:
-            result = subprocess.run([codex, "exec", "--ephemeral", "--sandbox", "read-only", "-C", str(repo), "-"],
-                                    input=prompt, capture_output=True, encoding="utf-8", errors="replace", timeout=180)
-            if result.returncode == 0 and result.stdout.strip():
-                print(result.stdout.strip())
-                return
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-        print("Codex 摘要不可用，以下列出实际文件变更。")
-    for entry in entries:
-        print(f"- {entry}")
+    overview = "\n".join(f"- {entry}" for entry in entries) or "已更新仓库，已启用的 Skill 均无变化。"
+    print(overview)
+    details = f"{old} -> {new}\n{overview}\n\n变动文件\n" + "\n".join(filter(None, changed))
+    patch = ""
+    if filters:
+        patch = git(repo, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+                    "--unified=2", old, new, "--", *sorted(filters))
+    report.record(source["path"], details, changed=True, patch=patch)
 
 
-def update_source(root, source, agents, home, *, links_only=False, no_ai=False, init_missing=True):
+def update_source(root, source, agents, home, *, links_only=False, init_missing=True, report=None):
     path = source["path"]
     print(f"\n[{path}]", flush=True)
     repo = root / path
@@ -351,8 +338,8 @@ def update_source(root, source, agents, home, *, links_only=False, no_ai=False, 
         git(root, "submodule", "update", "--init", "--remote", "--checkout", "--", path)
     new = git(repo, "rev-parse", "HEAD")
     after = read_skills(repo, new, source) if old != new else before
-    if not links_only:
-        report_changes(repo, source, old, new, before, after, no_ai)
+    if report is not None:
+        report_changes(repo, source, old, new, before, after, report)
     linked = git(repo, "rev-parse", "--verify", "--quiet", LINKED_REF, missing_ok=True)
     previous = read_skills(repo, linked, source) if linked and linked != old else before
     sync_agents(repo, source, previous, after, agents, home)
@@ -360,17 +347,26 @@ def update_source(root, source, agents, home, *, links_only=False, no_ai=False, 
     return after
 
 
-def update_sources(home, **options):
+def update_sources(home, *, links_only=False, init_missing=True, no_ai=False, ai_command=None):
     """Apply the requested operation to each registered source under the shared lock."""
     failed = False
     with update_lock(ROOT):
         config = read_config(ROOT)
-        for source in configured_sources(ROOT, config.get("sources", [])):
+        report = None if links_only else UpdateReport(ROOT)
+        sources = configured_sources(ROOT, config.get("sources", []))
+        if not sources and report is not None:
+            report.record("来源", "当前没有已登记的 Skill 来源。")
+        for source in sources:
             try:
-                update_source(ROOT, source, config["agents"], home, **options)
+                update_source(ROOT, source, config["agents"], home, links_only=links_only,
+                              init_missing=init_missing, report=report)
             except (OSError, ValueError, KeyError, RuntimeError) as exc:
                 print(f"{source['path']} — {exc}", file=sys.stderr)
+                if report is not None:
+                    report.record(source["path"], f"处理失败：{exc}")
                 failed = True
+    if report is not None:
+        report.finish(no_ai, ai_command)
     return int(failed)
 
 

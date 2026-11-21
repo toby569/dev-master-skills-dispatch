@@ -87,12 +87,12 @@ class InteractiveTests(unittest.TestCase):
         self.env["GIT_ALLOW_PROTOCOL"] = "none"
         revision = self.git(self.source, "rev-parse", "HEAD")
 
-        self.assertIn("调整入口 1 个", self.cli("sync-skills.py"))
+        self.assertIn("调整入口 1 个", self.cli("sync-skills-to-local-agents.py"))
         entry = self.home / ".example/skills/test-skill"
         self.assertEqual(entry.resolve(), self.source.resolve())
         self.assertTrue((entry / "SKILL.md").is_file())
         self.assertEqual(self.git(self.source, "rev-parse", "HEAD"), revision)
-        self.assertIn("调整入口 0 个", self.cli("sync-skills.py"))
+        self.assertIn("调整入口 0 个", self.cli("sync-skills-to-local-agents.py"))
         self.assertFalse((self.hub / "reports").exists())
 
     def test_update_writes_a_report_and_syncs_without_ai(self):
@@ -133,7 +133,7 @@ class InteractiveTests(unittest.TestCase):
         config["agents"]["example"] = ".example/skills"
         self.config_file.write_text(json.dumps(config))
 
-        output = self.cli("sync-skills.py", status=1)
+        output = self.cli("sync-skills-to-local-agents.py", status=1)
         self.assertIn("upstreams/missing — 子模块尚未检出", output)
         self.assertFalse((self.hub / "upstreams/missing").exists())
         self.assertTrue((self.home / ".example/skills/test-skill/SKILL.md").is_file())

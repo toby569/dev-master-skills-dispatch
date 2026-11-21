@@ -48,14 +48,14 @@ python scripts/update-skills.py
 
 使用其他 AI 工具时，可在更新命令末尾加上 `--ai-command <程序> [参数...]`。脚本只运行指定程序，通过标准输入传入变更记录，从标准输出读取摘要。
 
-首次换机可以使用 `git clone --recurse-submodules <本仓库地址>`，然后运行 `python scripts/sync-skills.py`，按本地检出的版本创建个人入口。需要使用其他个人目录时，可传入 `--agent-home <目录>`。日常更新后，在主仓库提交变更的子模块指针即可保存这组版本。
+首次换机可以使用 `git clone --recurse-submodules <本仓库地址>`，然后运行 `python scripts/sync-skills-to-local-agents.py`，按本地检出的版本创建个人入口。需要使用其他个人目录时，可传入 `--agent-home <目录>`。日常更新后，在主仓库提交变更的子模块指针即可保存这组版本。
 
-### 将当前 Skill 同步到新 Agent工具
+### 将当前 Skill 同步到本地 Agent
 
 在 [config/skills.json](config/skills.json) 的 `agents` 对象中添加新工具及其 Skill 目录，例如 `"my-agent": ".my-agent/skills"`。保存后从仓库根目录运行：
 
 ```sh
-python scripts/sync-skills.py
+python scripts/sync-skills-to-local-agents.py
 ```
 
 脚本按本地已检出的版本，将各来源的公开 Skill 同步到所有已配置的 Agent。示例中的目录会自动创建在个人主目录下，也可以用 `--agent-home <目录>` 指定其他根目录。重复运行只会调整有变化的入口。如果某个来源尚未检出，脚本会提示该来源，并继续同步其他来源。需要拉取上游新版本时，运行 `python scripts/update-skills.py`。

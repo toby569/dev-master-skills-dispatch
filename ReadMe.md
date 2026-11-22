@@ -1,78 +1,68 @@
-# 版本记录
+# Dev Master Skills Dispatch
 
-|    日期    | 版本  |   说明   | 作者 |
-| :--------: | :---: | :------: | :--: |
-| 2023-10-11 | 1.0.0 | 初始版本 | toby |
-|            |       |          |      |
-|            |       |          |      |
+如果你在 Codex 和 Claude Code 里用同一个 Skill，又从几个不同作者那里安装了其他 Skill，升级一次就得检查好几个仓库，再给两个工具分别换文件。**这个工具让多个 Agent 共用一份 Skill 源码。运行 `python scripts/update-skills.py`，就能更新所有已登记的来源，并看到这次改动影响了哪些 Skill。**
 
-# 目录
+## 快速开始
 
-[toc]
-
-
-
-## 使用方法
-
-### 添加 Skill 来源
-
-运行独立的添加脚本：
+准备好 Git 和 Python 3.10 或更高版本，运行以下命令，把本仓库记录的 Skill 版本同步到本机：
 
 ```sh
-python scripts/add-skill-repo.py
+git clone --recurse-submodules https://github.com/toby569/dev-master-skills-dispatch.git
+cd dev-master-skills-dispatch
+python scripts/sync-skills-to-local-agents.py
 ```
 
-粘贴 Git 仓库的 HTTPS 或 SSH 克隆地址，也可以输入 GitHub 的 `owner/repo`。脚本会建议本地目录名，回车即可接受，也可以输入其他名称。添加成功后会显示发现的 Skill，并同步到配置的个人 Agent。已登记的地址会复用原有目录。输入 `q` 可以取消。
-
-默认按各子模块的提交内容发现 Skill：
-
-1. 优先使用 `.claude-plugin/plugin.json` 或 `.codex-plugin/plugin.json` 的 `skills` 声明，仅分发声明的目录。
-2. 仓库根目录含有 `SKILL.md` 时，按文件头的 `name` 分发这个单独的 Skill。
-3. 其他仓库从 `skills/` 递归查找 `SKILL.md`。每个 Skill 自带的示例和隐藏子目录均跳过。没有匹配项的仓库仍更新，入口数显示为 0。
-
-[config/skills.json](config/skills.json) 的 `agents` 定义个人入口位置，`sources` 只需填写有例外配置的子模块。来源的 `path` 相对于仓库根目录。例如，使用非标准目录时可添加 `{"path":"upstreams/example","skillRoots":["packages/public-skills"]}`。也可以通过 `manifest` 指定其他发布清单。每个来源可以设置 `aliases` 解决同名冲突，用 `sharedPaths` 将共享文件纳入变更摘要。
-
-当前 Matt Pocock 来源按其插件发布清单分发，Vercel 来源从 `skills/find-skills` 分发 `find-skills`。
-
-### 更新 Skill
-
-需要 Python 3.10 或以上版本和 Git。在仓库根目录运行：
+默认同步到个人目录 `~/.agents/skills`（Codex）和 `~/.claude/skills`（Claude Code）。仓库已收录 Matt Pocock 的开发工作流、Vercel 的 `find-skills` 和 BMAD-METHOD。以后要获取上游新版，在仓库根目录运行：
 
 ```sh
 python scripts/update-skills.py
 ```
 
-脚本更新子模块，并把公开 Skill 同步到已配置的 Agent。每次更新都在仓库的 `reports/` 目录生成一份带时间戳的 UTF-8 文本文件（`skill-updates-*.txt`），终端会显示完整路径。文件记录各来源的版本、变动文件、受影响的 Skill 和相关 Git 补丁。上游获取失败时，脚本会记录具体来源，继续处理其余来源，最后返回非零退出码。
+## 说明
 
-有更新时，脚本先保存明细，再依次尝试本机已配置的 Codex CLI 和 Claude Code CLI 生成中文摘要。成功后，摘要会显示在终端并追加到同一份文件。两个工具都不可用时，按终端提示打开明细即可。要直接生成明细并跳过 AI，运行 `python scripts/update-skills.py --no-ai`。添加、移除和只同步入口均只需 Python 和 Git。
+**更新后能知道使用方式有什么变化。** 例如，Matt Pocock 的 `tdd` 曾改过一行指令。以前只问“要测试哪些接口？”，更新后还会说明在每个候选接口上测试能发现什么、会漏掉什么。更新明细会列出受影响的 Skill、前后提交和相关补丁。配置好 AI 命令行工具后，还可以直接看这样的中文解读。[查看这次上游改动](https://github.com/mattpocock/skills/commit/3f599139104dfceabc7754eeb91319802f85e042)
 
-使用其他 AI 工具时，可在更新命令末尾加上 `--ai-command <程序> [参数...]`。脚本只运行指定程序，通过标准输入传入变更记录，从标准输出读取摘要。
+**换电脑或与同事分享时能复现同一套版本。** 每个来源都是 Git 子模块。把更新后的子模块指针提交并推送到自己的管理仓库，另一台电脑按“快速开始”克隆和同步，拿到的就是你记录的版本。
 
-首次换机可以使用 `git clone --recurse-submodules <本仓库地址>`，然后运行 `python scripts/sync-skills-to-local-agents.py`，按本地检出的版本创建个人入口。需要使用其他个人目录时，可传入 `--agent-home <目录>`。日常更新后，在主仓库提交变更的子模块指针即可保存这组版本。
+## 常用命令
 
-### 将当前 Skill 同步到本地 Agent
+| 我想做什么 | 在仓库根目录运行 | 结果 |
+| --- | --- | --- |
+| 添加一个作者的仓库 | `python scripts/add-skill-repo.py` | 输入 HTTPS、SSH 地址或 GitHub 的 `owner/repo`，回车接受建议目录，发现的 Skill 会同步到个人 Agent。 |
+| 更新全部来源 | `python scripts/update-skills.py` | 拉取新版、同步入口，把明细保存到 `reports/skill-updates-*.txt`。 |
+| 在另一台电脑或新配置的 Agent 上启用当前版本 | `python scripts/sync-skills-to-local-agents.py` | 按本地已检出的版本创建或修复入口。重复运行只调整有变化的入口。 |
+| 移除一个来源 | `python scripts/remove-skill-repo.py` | 按编号选择仓库，再选择是否清理个人 Agent 入口。 |
 
-在 [config/skills.json](config/skills.json) 的 `agents` 对象中添加新工具及其 Skill 目录，例如 `"my-agent": ".my-agent/skills"`。保存后从仓库根目录运行：
+### 查看更新明细和中文摘要
 
-```sh
-python scripts/sync-skills-to-local-agents.py
-```
+更新命令会在终端打印报告的完整路径。报告记录各来源的提交、变动文件、受影响的 Skill 和相关 Git 补丁。某个来源拉取失败时，脚本会记录原因，继续处理其余来源，并以非零退出码结束。
 
-脚本按本地已检出的版本，将各来源的公开 Skill 同步到所有已配置的 Agent。示例中的目录会自动创建在个人主目录下，也可以用 `--agent-home <目录>` 指定其他根目录。重复运行只会调整有变化的入口。如果某个来源尚未检出，脚本会提示该来源，并继续同步其他来源。需要拉取上游新版本时，运行 `python scripts/update-skills.py`。
+Python 和 Git 足以完成添加、更新、同步和移除。AI 只用于解读变更。有变更时，脚本会先保存明细，再尝试本机已配置的 Codex CLI 和 Claude Code CLI，成功后把中文摘要追加到同一份报告。也可以按需选择：
 
+- 只想看 Git 明细时，运行 `python scripts/update-skills.py --no-ai`。
+- 要使用其他 AI 工具，可以在更新命令的末尾加 `--ai-command <程序> [参数...]`。程序从标准输入读取变更记录，通过标准输出返回摘要。
 
+### 配置其他 Agent 或非标准仓库
 
-### 移除 Skill 来源
+编辑 [config/skills.json](config/skills.json) 的 `agents`。例如，添加 `"my-agent": ".my-agent/skills"`，再运行本地同步命令，就会在个人主目录下创建对应入口。四个命令均支持 `--agent-home <目录>`。若本地同步提示某个子模块尚未检出，可先运行 `git submodule update --init --recursive`。
 
-```sh
-python scripts/remove-skill-repo.py
-```
+添加来源时，脚本优先读取 Claude 或 Codex 插件清单中的 `skills` 声明，其次识别根目录里的单个 `SKILL.md`，最后从 `skills/` 递归发现 Skill。标准布局只需提供仓库地址。特殊情况在配置文件的 `sources` 中指定：
 
-脚本列出已登记的子模块。输入编号，选择是否同步清理个人 Agent 入口，再确认移除。回车或输入 `q` 可以在选择阶段退出。
+- `skillRoots` 或 `manifest` 指定非标准技能目录或发布清单。例如 `{"path":"upstreams/example","skillRoots":["packages/public-skills"]}`。
+- `aliases` 处理同名入口。例如 Claude Code 中的 `/mattpocock-code-review` 可以和团队自己的 `/code-review` 共存。
+- `sharedPaths` 把多个 Skill 共用的文件纳入更新摘要。
 
-- **清理入口**会移除所选子模块的工作目录和指向它的受管入口。同名的其他来源和手工安装的目录会保留。子模块内有本地修改或未提交的文件时，脚本会提示先保存。
-- **保留入口**会取消 Git 子模块登记，保留已有入口、本地源码和该来源的别名等配置。源码目录此时是未跟踪目录，再次添加同一仓库可重新登记它。提交移除操作时，只提交计划中的文件，避免把保留的目录重新加入索引。
+Windows 上，Codex 使用保留上游描述和 `agents` 元数据的 `SKILL.md` 入口，`.source` 目录联接指向原始脚本与模板。Claude Code 使用目录联接，同名 Skill 使用单独命名的入口。
 
-来源登记的改动保存在本地 Git 仓库中。完成后用 `git status` 查看改动，再按需提交和推送。添加和移除命令均支持 `--agent-home <目录>`。日常更新仍使用 `python scripts/update-skills.py`。
+### 移除来源时如何选择
 
-Windows 版 Codex 的个人目录使用可发现的 `SKILL.md` 入口，保留上游描述与 `agents` 元数据，正文指向子模块原件。每个入口的 `.source` 目录联接可直接访问原始脚本和模板。Claude Code 使用目录联接，重名的 Skill 使用独立命名的入口。Claude Code 的 Matt 版代码审查使用 `/mattpocock-code-review`。
+- **清理入口**适合以后也不用这个来源的情况。脚本会移除子模块工作目录，以及个人 Agent 中指向它的受管入口，保留其他来源和手动安装的同名目录。若子模块有本地修改，脚本会提示先保存。
+- **保留入口**适合想继续用当前版本、停止跟进上游的情况。脚本取消子模块登记，保留现有入口、别名配置和本地源码。源码目录会变成未跟踪目录。提交移除操作时，只暂存本次计划提交的文件。
+
+添加或移除后，用 `git status` 检查管理仓库的改动，再按需提交和推送。交互式菜单中输入 `q` 可以取消。
+
+## 版本记录
+
+| 日期 | 版本 | 说明 | 作者 |
+| --- | --- | --- | --- |
+| 2023-10-11 | 1.0.0 | 初始版本 | toby |

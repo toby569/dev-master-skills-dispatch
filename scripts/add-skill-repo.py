@@ -6,7 +6,7 @@ import re
 from urllib.parse import urlsplit
 
 from internal.skill_dispatch import (
-    CONFIG_PATH, ROOT, agent_home_argument, ask, configured_sources, git, read_config,
+    CONFIG_PATH, ROOT, agent_home_argument, ask, configured_sources, directory_groups, git, local_profile, read_config,
     registered_submodules, run_cli, update_lock, update_source,
 )
 
@@ -82,6 +82,7 @@ def main():
 
     with update_lock(ROOT):
         config = read_config(ROOT)
+        profile = local_profile(ROOT, home, config)
         modules = registered_submodules(ROOT)
         known = existing_path(modules, key)
         if known:
@@ -103,9 +104,11 @@ def main():
                 git(ROOT, "submodule", "add", "--name", module_name, "--", url, path)
             except RuntimeError as exc:
                 raise RuntimeError(f"添加失败。请核对仓库地址、网络和 Git 访问权限。\n{exc}") from exc
-        source = next(s for s in configured_sources(ROOT, config.get("sources", [])) if s["path"] == path)
+        sources = configured_sources(ROOT, config.get("sources", []))
+        targets = directory_groups(home, profile["agents"], sources)
+        source = next(s for s in sources if s["path"] == path)
         try:
-            skills = update_source(ROOT, source, config["agents"], home, links_only=True)
+            skills = update_source(ROOT, source, targets, links_only=True)
         except (OSError, RuntimeError, ValueError, KeyError) as exc:
             raise RuntimeError(f"来源已登记，入口同步未完成：{exc}\n修正后重新运行添加脚本即可重试。") from exc
         if skills:

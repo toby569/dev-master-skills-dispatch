@@ -3,43 +3,16 @@ import argparse
 import json
 
 from internal.skill_dispatch import (
-    CONFIG_PATH, ROOT, agent_home_argument, ask, git, link_target, read_config, registered_submodules,
-    run_cli, sync_entry, update_lock, wrapper_text, write_text_if_changed,
+    CONFIG_PATH, ROOT, agent_home_argument, ask, git, local_profile, owned_entries, profile_roots,
+    read_config, registered_submodules, remove_owned_entries, run_cli, update_lock, write_text_if_changed, yes,
 )
 
 
-def yes(message):
-    while True:
-        answer = ask(message + " [y/N]：").casefold()
-        if answer in ("y", "yes", "是"):
-            return True
-        if answer in ("", "n", "no", "否"):
-            return False
-        print("请输入 y 或 n，也可输入 q 取消。")
-
-
-def owned_entries(home, agents, repo):
-    entries = {}
-    for location in agents.values():
-        root = home / location
-        if not root.is_dir():
-            continue
-        for path in root.iterdir():
-            target = link_target(path)
-            wrapper = target is None
-            if wrapper and path.is_dir():
-                target = link_target(path / ".source")
-            if target and target.is_relative_to(repo):
-                entries[path] = (target, wrapper)
-    return entries
-
-
-def remove_source(path, module, cleanup, home, config):
+def remove_source(path, module, cleanup, config, entries):
     repo = (ROOT / path).resolve()
     if (not repo.is_relative_to(ROOT) or repo == ROOT or repo.is_relative_to(ROOT / ".git")
             or repo != ROOT / path):
         raise ValueError(f"子模块路径不是管理仓库内的独立目录：{path}")
-    entries = owned_entries(home, config["agents"], repo)
     keep_checkout = bool(entries) and not cleanup
     if git(ROOT, "diff", "--name-only", "--", ".gitmodules"):
         raise ValueError(".gitmodules 有未暂存编辑，请先处理后再移除来源。")
@@ -74,31 +47,8 @@ def remove_source(path, module, cleanup, home, config):
             git(ROOT, "add", "--", ".gitmodules")
             raise
     else:
-        for entry, (target, wrapper) in entries.items():
-            if not wrapper:
-                continue
-            if any(child.name not in {"SKILL.md", ".source", "agents"} for child in entry.iterdir()):
-                raise ValueError(f"入口中有额外文件，已保留：{entry}")
-            definition = entry / "SKILL.md"
-            if definition.is_file():
-                text = definition.read_text(encoding="utf-8-sig")
-                if (target / "SKILL.md").is_file():
-                    generated = text == wrapper_text(target, entry.name)
-                else:
-                    generated = text.rstrip().endswith(f"Resolve its scripts, references and templates relative to {target}.")
-                if not generated:
-                    raise ValueError(f"入口文件有自定义内容，已保留：{definition}")
-        removed = []
-        try:
-            for entry, (target, wrapper) in entries.items():
-                sync_entry(entry, None, target, entry.name, wrapper)
-                removed.append((entry, target, wrapper))
+        with remove_owned_entries(entries):
             git(ROOT, "rm", *rm_options, "--", path)
-        except (OSError, ValueError, RuntimeError):
-            for entry, target, wrapper in removed:
-                if (target / "SKILL.md").is_file():
-                    sync_entry(entry, target, None, entry.name, wrapper)
-            raise
 
     overrides = config.get("sources", [])
     remaining = [item for item in overrides if item["path"] != path]
@@ -136,9 +86,10 @@ def main():
             break
         print(f"请输入 1 到 {len(paths)} 之间的编号。")
     path = paths[int(choice) - 1]
-    config = read_config(ROOT)
     repo = (ROOT / path).resolve()
-    entries = owned_entries(home, config["agents"], repo)
+    with update_lock(ROOT):
+        profile = local_profile(ROOT, home, read_config(ROOT))
+        entries = owned_entries(profile_roots(home, profile), repo)
     print(f"选中 {path}，找到 {len(entries)} 个指向此来源的个人入口。")
     cleanup = True
     if entries:
@@ -150,9 +101,10 @@ def main():
     with update_lock(ROOT):
         module = registered_submodules(ROOT).get(path)
         config = read_config(ROOT)
-        if module != modules[path] or owned_entries(home, config["agents"], repo) != entries:
+        profile = local_profile(ROOT, home, config)
+        if module != modules[path] or owned_entries(profile_roots(home, profile), repo) != entries:
             raise ValueError("来源或个人入口已变化，请重新选择。")
-        remove_source(path, module, cleanup, home, config)
+        remove_source(path, module, cleanup, config, entries)
     return 0
 
 

@@ -35,6 +35,8 @@ class InteractiveTests(unittest.TestCase):
         for directory in (self.hub, self.remote):
             self.git(directory, "add", ".")
             self.git(directory, "commit", "-qm", "initial")
+        self.local_file = self.hub / "config" / "skills.local.json"
+        self.local_file.write_bytes(self.config_file.read_bytes())
         self.source = self.hub / "upstreams/example-demo"
         self.entry = self.home / ".agents/skills/test-skill"
         self.claude = self.home / ".claude/skills/test-skill"
@@ -83,7 +85,7 @@ class InteractiveTests(unittest.TestCase):
         self.cli("add-skill-repo.py", URL + "\n\n")
         config = json.loads(self.config_file.read_text())
         config["agents"]["example"] = ".example/skills"
-        self.config_file.write_text(json.dumps(config))
+        self.local_file.write_text(json.dumps(config))
         self.env["GIT_ALLOW_PROTOCOL"] = "none"
         revision = self.git(self.source, "rev-parse", "HEAD")
 
@@ -131,7 +133,7 @@ class InteractiveTests(unittest.TestCase):
                            + modules.read_text())
         config = json.loads(self.config_file.read_text())
         config["agents"]["example"] = ".example/skills"
-        self.config_file.write_text(json.dumps(config))
+        self.local_file.write_text(json.dumps(config))
 
         output = self.cli("sync-skills-to-local-agents.py", status=1)
         self.assertIn("upstreams/missing — 子模块尚未检出", output)
@@ -168,6 +170,74 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(foreign.read_text(), "team workflow")
         self.assertEqual(json.loads(self.config_file.read_text())["sources"], [{"path": "other"}])
         self.assertTrue(self.git(self.hub, "diff", "--name-only", "--", "config/skills.json"))
+
+
+    def test_first_run_headless_and_explicit_choice(self):
+        self.local_file.unlink()
+        shared = self.config_file.read_bytes()
+        sync = "sync-skills-to-local-agents.py"
+        self.assertIn("--configure", self.cli(sync, status=1))
+        self.assertFalse(self.home.exists())
+        self.assertIn("已取消", self.cli(sync, "2\n\nn\n", args=("--configure",)))
+        self.assertFalse(self.local_file.exists())
+        self.cli(sync, "2\n\ny\n", args=("--configure",))
+        self.assertEqual(json.loads(self.local_file.read_text()), {"agents": {"claude": ".claude/skills"}})
+        self.cli("add-skill-repo.py", URL + "\n\n")
+        self.assertTrue(self.claude.is_dir())
+        self.assertFalse(self.entry.parent.exists())
+        self.assertEqual(self.config_file.read_bytes(), shared)
+
+    def test_multi_select_custom_and_clean_only_retired_roots(self):
+        sync = "sync-skills-to-local-agents.py"
+        self.cli("add-skill-repo.py", URL + "\n\n")
+        custom = self.home / "Team Skills"
+        # Both custom tools share a directory. The second spelling uses an absolute path.
+        output = self.cli(sync, f"1,2,+\n\n\nteam\nTeam Skills\ny\neditor\n{custom}\nn\ny\n",
+                          args=("--configure",))
+        self.assertIn("team、editor", output)
+        self.assertIn("本次调整入口 1 个", output)
+        foreign = self.entry.parent / "personal"
+        foreign.mkdir()
+        # Keep Claude and 'editor'. The shared directory must survive removing 'team'.
+        output = self.cli(sync, "2,4\n\n\ny\ny\n", args=("--configure",))
+        self.assertIn("清理其中 1 个", output)
+        self.assertFalse(self.entry.exists())
+        self.assertTrue(foreign.is_dir())
+        self.assertTrue((custom / "test-skill/SKILL.md").is_file())
+        self.assertTrue((self.claude / "SKILL.md").is_file())
+
+    def test_retained_roots_are_known_to_source_removal(self):
+        self.cli("add-skill-repo.py", URL + "\n\n")
+        self.cli("sync-skills-to-local-agents.py", "2\n\nn\ny\n", args=("--configure",))
+        self.assertTrue((self.entry / "SKILL.md").is_file())
+        self.assertEqual(json.loads(self.local_file.read_text())["retainedRoots"], [".agents/skills"])
+        self.assertIn("已清理 2", self.cli("remove-skill-repo.py", "1\ny\ny\n"))
+        self.assertFalse(self.entry.exists())
+
+    def test_bad_targets_do_not_block_healthy_agent(self):
+        self.cli("add-skill-repo.py", URL + "\n\n")
+        self.home.joinpath("blocked").write_text("keep")
+        self.local_file.write_text(json.dumps({"agents": {
+            "codex": "collision", "claude": "collision", "bad": "blocked/skills", "team": "team skills"
+        }}))
+        output = self.cli("sync-skills-to-local-agents.py", status=1)
+        for hint in ("入口格式或别名不同", "bad：0/1", "team：1/1", "同步成功"):
+            self.assertIn(hint, output)
+        self.assertFalse(self.home.joinpath("collision").exists())
+        self.assertTrue(self.home.joinpath("team skills/test-skill/SKILL.md").is_file())
+        self.assertEqual(self.home.joinpath("blocked").read_text(), "keep")
+
+    def test_reenabled_agent_catches_up_after_a_skill_rename(self):
+        sync = "sync-skills-to-local-agents.py"
+        self.cli("add-skill-repo.py", URL + "\n\n")
+        self.cli(sync, "2\n\nn\ny\n", args=("--configure",))
+        (self.remote / "SKILL.md").write_text("---\nname: renamed\ndescription: Example\n---\nNew name.\n")
+        self.git(self.remote, "commit", "-qam", "Rename skill")
+        self.cli("update-skills.py", args=("--no-ai",))
+        self.assertTrue(self.entry.exists())
+        self.cli(sync, "1,2\n\n\ny\n", args=("--configure",))
+        self.assertFalse(self.entry.exists())
+        self.assertTrue((self.entry.parent / "renamed/SKILL.md").is_file())
 
 
 if __name__ == "__main__":

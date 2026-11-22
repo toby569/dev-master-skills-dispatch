@@ -1,6 +1,7 @@
 """Update skill submodules, summarize changes and sync personal agent entries."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,9 @@ import tempfile
 from contextlib import contextmanager
 from typing import NamedTuple
 
+from .agent_targets import (
+    LOCAL_CONFIG, ask, choose_targets, directory_groups, read_profile, require_interactive, target_root, yes,
+)
 from .update_report import UpdateReport
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -264,25 +268,156 @@ def sync_entry(path, new, old, name, wrapper):
     return modified or metadata_changed or entry_changed
 
 
-def sync_agents(repo, source, before, after, agents, home):
-    issues = []
+def owned_entries(roots, repo):
+    entries = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.iterdir():
+            target = link_target(path)
+            wrapper = target is None
+            if wrapper and path.is_dir():
+                target = link_target(path / ".source")
+            if target and target.is_relative_to(repo):
+                entries[path] = (target, wrapper)
+    return entries
+
+
+def validate_entries(entries):
+    for entry, (target, wrapper) in entries.items():
+        if not wrapper:
+            continue
+        if any(child.name not in {"SKILL.md", ".source", "agents"} for child in entry.iterdir()):
+            raise ValueError(f"入口中有额外文件，已保留：{entry}")
+        definition = entry / "SKILL.md"
+        if definition.is_file():
+            text = definition.read_text(encoding="utf-8-sig")
+            if (target / "SKILL.md").is_file():
+                generated = text == wrapper_text(target, entry.name)
+            else:
+                generated = text.rstrip().endswith(f"Resolve its scripts, references and templates relative to {target}.")
+            if not generated:
+                raise ValueError(f"入口文件有自定义内容，已保留：{definition}")
+
+
+@contextmanager
+def remove_owned_entries(entries):
+    """Restore removed entries if a later removal or its associated operation fails."""
+    validate_entries(entries)
+    removed = []
+    try:
+        for entry, (target, wrapper) in entries.items():
+            sync_entry(entry, None, target, entry.name, wrapper)
+            removed.append((entry, target, wrapper))
+        yield
+    except (ValueError, OSError, RuntimeError, KeyboardInterrupt):
+        for entry, target, wrapper in removed:
+            if (target / "SKILL.md").is_file():
+                sync_entry(entry, target, None, entry.name, wrapper)
+        raise
+
+
+def profile_roots(home, profile):
+    locations = [*profile["agents"].values(), *profile.get("retainedRoots", [])]
+    return {target_root(home, location) for location in locations}
+
+
+def local_profile(repo, home, shared, *, configure=False):
+    previous = read_profile(repo)
+    if previous is not None and not configure:
+        return previous
+    if not configure:
+        require_interactive()
+    sources = configured_sources(repo, shared.get("sources", []))
+    chosen = choose_targets(home, {**shared, "sources": sources}, previous["agents"] if previous is not None else None)
+    active = {target_root(home, p) for p in chosen.values()}
+    # Check known legacy directories on first setup so existing installs stay discoverable.
+    old = previous if previous is not None else {"agents": shared.get("agents", {})}
+    old_locations = [*old["agents"].values(), *old.get("retainedRoots", [])]
+    entries, kept, unreadable = {}, [], []
+    source_paths = [(repo / source["path"]).resolve() for source in sources]
+    seen = set(active)
+    for location in old_locations:
+        try:
+            root = target_root(home, location)
+            if root in seen:
+                continue
+            seen.add(root)
+            owned = {}
+            for source in source_paths:
+                owned.update(owned_entries([root], source))
+            if owned:
+                entries.update(owned)
+                kept.append(location)
+        except (OSError, ValueError, RuntimeError) as exc:
+            print(f"无法检查已停用目录 {location}：{exc}。已记住位置，稍后可重试。")
+            unreadable.append(location)
+    cleanup = False
+    if kept:
+        print("下列目录已停用，含有受管入口：" + "、".join(str(target_root(home, p)) for p in kept))
+        cleanup = yes(f"清理其中 {len(entries)} 个受管入口吗？回车保留")
+    if not chosen:
+        print("本次未选择 Agent。来源仍可更新。")
+    if not yes("保存本机配置并继续吗？"):
+        raise EOFError
+    profile = {"agents": chosen}
+    retained = unreadable + ([] if cleanup else kept)
+    if retained:
+        profile["retainedRoots"] = retained
+    with remove_owned_entries(entries if cleanup else {}):
+        write_text_if_changed(repo / LOCAL_CONFIG, json.dumps(profile, ensure_ascii=False, indent=2) + "\n")
+    print(f"本机配置已保存到 {repo / LOCAL_CONFIG}")
+    return profile
+
+
+def sync_directory(repo, source, before, after, agent, root):
+    root.mkdir(parents=True, exist_ok=True)
+    aliases = source.get("aliases", {}).get(agent, {})
+    count, errors = 0, []
+    for name in sorted(before.keys() | after.keys()):
+        alias = aliases.get(name, name)
+        try:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", alias):
+                raise ValueError(f"无效的入口名: {alias}")
+            old = repo / before[name] if name in before else None
+            new = repo / after[name] if name in after else None
+            if new and not (new / "SKILL.md").is_file():
+                raise ValueError(f"缺少 SKILL.md: {new}")
+            count += sync_entry(root / alias, new, old, alias, agent == "codex" or alias != name)
+        except (OSError, ValueError, RuntimeError) as exc:
+            errors.append(f"{name} — {exc}")
+    return count, errors
+
+
+def sync_agents(repo, source, targets, old, new, before, after, completed):
+    groups, target_errors = targets
+    issues = [f"{name} — {error}" for name, error in target_errors.items()]
     modified = 0
-    for agent, relative_root in agents.items():
-        root = home / relative_root
-        root.mkdir(parents=True, exist_ok=True)
-        aliases = source.get("aliases", {}).get(agent, {})
-        for name in sorted(before.keys() | after.keys()):
-            alias = aliases.get(name, name)
-            try:
-                if not re.fullmatch(r"[A-Za-z0-9_-]+", alias):
-                    raise ValueError(f"无效的入口名: {alias}")
-                old = repo / before[name] if name in before else None
-                new = repo / after[name] if name in after else None
-                if new and not (new / "SKILL.md").is_file():
-                    raise ValueError(f"缺少 SKILL.md: {new}")
-                modified += sync_entry(root / alias, new, old, alias, agent == "codex" or alias != name)
-            except (OSError, ValueError) as exc:
-                issues.append(f"{agent}/{name} — {exc}")
+    # Each physical directory may have missed different updates while offline or disabled.
+    checkpoints = dict(line.split() for line in git(
+        repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/skills-dispatch/"
+    ).splitlines())
+    catalogs = {old: before, new: after}
+    for root, group in groups.items():
+        label = "、".join(group)
+        key = hashlib.sha256(os.fsencode(os.path.normcase(str(root)))).hexdigest()
+        ref = "refs/skills-dispatch/targets/" + key
+        previous = checkpoints.get(ref, checkpoints.get(LINKED_REF, old))
+        try:
+            if previous not in catalogs:
+                catalogs[previous] = read_skills(repo, previous, source)
+            count, errors = sync_directory(repo, source, catalogs[previous], after, group[0], root)
+            modified += count
+            if errors:
+                raise ValueError("\n".join(errors))
+            if checkpoints.get(ref) != new:
+                git(repo, "update-ref", ref, new)
+            if completed is not None:
+                for agent in group:
+                    completed[agent] += 1
+            print(f"  {label} → {root}：同步成功，本次调整 {count} 个入口。")
+        except (OSError, ValueError, RuntimeError) as exc:
+            issues.append(f"{label} ({root}) — {exc}")
     print(f"发布清单 {len(after)} 项，本次调整入口 {modified} 个。")
     if issues:
         raise RuntimeError("\n".join(issues))
@@ -322,7 +457,7 @@ def report_changes(repo, source, old, new, before, after, report):
     report.record(source["path"], details, changed=True, patch=patch)
 
 
-def update_source(root, source, agents, home, *, links_only=False, init_missing=True, report=None):
+def update_source(root, source, targets, *, links_only=False, init_missing=True, report=None, completed=None):
     path = source["path"]
     print(f"\n[{path}]", flush=True)
     repo = root / path
@@ -340,31 +475,41 @@ def update_source(root, source, agents, home, *, links_only=False, init_missing=
     after = read_skills(repo, new, source) if old != new else before
     if report is not None:
         report_changes(repo, source, old, new, before, after, report)
-    linked = git(repo, "rev-parse", "--verify", "--quiet", LINKED_REF, missing_ok=True)
-    previous = read_skills(repo, linked, source) if linked and linked != old else before
-    sync_agents(repo, source, previous, after, agents, home)
+    sync_agents(repo, source, targets, old, new, before, after, completed)
     git(repo, "update-ref", LINKED_REF, new)
     return after
 
 
-def update_sources(home, *, links_only=False, init_missing=True, no_ai=False, ai_command=None):
+def update_sources(home, *, configure=False, links_only=False, init_missing=True, no_ai=False, ai_command=None):
     """Apply the requested operation to each registered source under the shared lock."""
     failed = False
     with update_lock(ROOT):
         config = read_config(ROOT)
-        report = None if links_only else UpdateReport(ROOT)
+        profile = local_profile(ROOT, home, config, configure=configure)
         sources = configured_sources(ROOT, config.get("sources", []))
+        targets = directory_groups(home, profile["agents"], sources)
+        report = None if links_only else UpdateReport(ROOT)
+        if not sources:
+            print("当前没有已登记的 Skill 来源。")
+            for agent, error in targets[1].items():
+                print(f"{agent} — {error}", file=sys.stderr)
+            failed = bool(targets[1])
         if not sources and report is not None:
             report.record("来源", "当前没有已登记的 Skill 来源。")
+        completed = dict.fromkeys(profile["agents"], 0)
         for source in sources:
             try:
-                update_source(ROOT, source, config["agents"], home, links_only=links_only,
-                              init_missing=init_missing, report=report)
+                update_source(ROOT, source, targets, links_only=links_only,
+                              init_missing=init_missing, report=report, completed=completed)
             except (OSError, ValueError, KeyError, RuntimeError) as exc:
                 print(f"{source['path']} — {exc}", file=sys.stderr)
                 if report is not None:
                     report.record(source["path"], f"处理失败：{exc}")
                 failed = True
+        if sources and completed:
+            print("\n各 Agent 同步结果")
+            for agent, count in completed.items():
+                print(f"  {agent}：{count}/{len(sources)} 个来源已同步")
     if report is not None:
         report.finish(no_ai, ai_command)
     return int(failed)
@@ -376,13 +521,6 @@ def read_config(root):
 
 def agent_home_argument(parser):
     parser.add_argument("--agent-home", type=Path, default=Path.home(), help="指定个人入口的根目录")
-
-
-def ask(message):
-    value = input(message).strip()
-    if value.casefold() == "q":
-        raise EOFError
-    return value
 
 
 def run_cli(main):
